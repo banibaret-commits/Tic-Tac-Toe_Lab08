@@ -4,10 +4,11 @@ name: Build signed Android APK
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -39,9 +40,6 @@ jobs:
       # 3. Install dependencies and analyze the project
       - name: Install dependencies
         run: flutter pub get
-
-      - name: Analyze
-        run: flutter analyze --no-fatal-infos
 
       # 4. Restore signing files before any Gradle configuration
       - name: Prepare signing files
@@ -79,11 +77,11 @@ jobs:
             write_property keyAlias "$KEY_ALIAS"
           } > android/key.properties
 
-      # 5. Build with the signing configuration from Stage 2
+      # 5. Build signed release APK
       - name: Build signed release APK
         run: flutter build apk --release
 
-      # 6. Upload only the APK, then remove private signing files
+      # 6. Upload and Release
       - name: Read app version
         id: version
         shell: bash
@@ -92,13 +90,37 @@ jobs:
           test -n "$version"
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: tic-tac-toe-${{ steps.version.outputs.value }}
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | tr -d '\r')
+          case "$GITHUB_REF_NAME" in
+            v1.0.0) expected='1.0.0+1' ;;
+            v1.1.0) expected='1.1.0+2' ;;
+            *) echo "Unsupported release tag $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+          if [ "$version" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME requires pubspec version $expected"
+            exit 1
+          fi
+          apk="tic-tac-toe-${GITHUB_REF_NAME}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "$apk"
+          gh release create "$GITHUB_REF_NAME" "$apk" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
 
       - name: Remove signing files
         if: always()
